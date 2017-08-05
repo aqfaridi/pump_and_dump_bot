@@ -1,4 +1,5 @@
 require "rest-client"
+require "colorize"
 require "json"
 BASE_URL = "https://bittrex.com/api/v1.1/"
 API_KEY = "<YOUR_API_KEY>"
@@ -65,13 +66,19 @@ end
 def call_api(url)
   response = RestClient.get(url)
   parsed_body = JSON.parse(response.body)
+  puts "Fetching Market Summary...".yellow
+  p [url, parsed_body]
+  puts (parsed_body["success"] ? "Success".green : "Failed".red)
   parsed_body["result"] if parsed_body["success"]
 end
 
 def call_secret_api(url)
   sign = hmac_sha256(url, API_SECRET)
   response = RestClient.get(url, {:apisign => sign})
+  puts "Calling API...".yellow
   parsed_body = JSON.parse(response.body)
+  p [url, parsed_body]
+  puts (parsed_body["success"] ? "Success".green : "Failed".red)
   parsed_body["result"] if parsed_body["success"]
 end
 
@@ -135,7 +142,6 @@ end
 
 def get_market_summary(market_name)
   market_summary_url = get_url({:api_type => "public", :action => "market_day_summary", :market => market_name})
-  p market_summary_url
   summary = call_api(market_summary_url).first
   low_24_hr, last_price, ask_price, volume = summary["Low"], summary["Last"], summary["Ask"], summary["BaseVolume"]
   [low_24_hr, last_price, ask_price, volume]
@@ -145,8 +151,19 @@ def buy_chunk(last_price, market_name, percent_increase, chunk)
   unit_price = last_price + last_price * percent_increase
   quantity = chunk/unit_price
   buy_limit_url = get_url({:api_type => "market", :action => "buy", :market => market_name, :quantity => quantity, :rate => unit_price})
+  puts "Purchasing coin...".yellow
+  p [{:api_type => "market", :action => "buy", :market => market_name, :quantity => quantity, :rate => unit_price}]
   order = call_secret_api(buy_limit_url)
-  @units_bought = quantity unless order["uuid"].nil?
+  puts ((order and !order["uuid"].nil?) ? "Success".green : "Failed".red)
+  cnt = 1
+  while cnt <= 3 and order and order["uuid"].nil? #retry
+    puts "Retry #{cnt}: Purchasing coin...".yellow
+    sleep(1) # half second
+    order = call_secret_api(buy_limit_url)
+    puts ((order and !order["uuid"].nil?) ? "Success".green : "Failed".red)
+    cnt += 1
+  end
+  @units_bought = quantity if order and !order["uuid"].nil?
   order
 end
 
@@ -160,8 +177,8 @@ def buy_bot(percent_increase = 0.05, chunk = 0.006, prepump_buffer = 0.5)
   low_24_hr, last_price, ask_price, volume = get_market_summary(market_name)
   total_spent = 0.0
   p [low_24_hr, last_price, ask_price, volume]
-  if volume < 60 and last_price < (1.0 + prepump_buffer) * low_24_hr #last_price is smaller than 50% increase since yerterday
-    p ["Coin is not prepumped, Purchasing..."]
+  if volume < 100 and last_price < (1.0 + prepump_buffer) * low_24_hr #last_price is smaller than 50% increase since yerterday
+    puts "Coin is not prepumped".blue
     order = buy_chunk(last_price, market_name, percent_increase, chunk)
     p [order, "Units Bought : #{@units_bought}"]
   end
@@ -197,12 +214,26 @@ def sell_bot(percent_decrease = 0.1)
   sell_price = last_price - percent_decrease*last_price
   get_balance_url = get_url({:api_type => "account", :action => "currency_balance", :currency => currency})
   balance_details = call_secret_api(get_balance_url)
-  p [market_name, last_price, balance_details["Available"], sell_price]
   sell_price = "%.8f" % sell_price
-  sell_limit_url = get_url({:api_type => "market", :action => "sell", :market => market_name, :quantity => balance_details["Available"], :rate => sell_price}) if balance_details and balance_details["Available"] and balance_details["Available"] > 0.0
-  p sell_limit_url
-  order_placed = call_secret_api(sell_limit_url)
-  p [order_placed, "Sell #{balance_details["Available"]} of #{market_name} at #{sell_price}"]
+  if balance_details and balance_details["Available"] and balance_details["Available"] > 0.0
+    p [market_name, last_price, balance_details["Available"], sell_price]
+    sell_limit_url = get_url({:api_type => "market", :action => "sell", :market => market_name, :quantity => balance_details["Available"], :rate => sell_price})
+    puts "Selling coin...".yellow
+    p [{:api_type => "market", :action => "sell", :market => market_name, :quantity => balance_details["Available"], :rate => sell_price}]
+    order_placed = call_secret_api(sell_limit_url)
+    puts (order_placed and !order_placed["uuid"].nil? ? "Success".green : "Failed".red)
+    cnt = 1
+    while cnt <= 3 and order_placed and order_placed["uuid"].nil? #retry
+      puts "Retry #{cnt} : Selling coin...".yellow
+      sleep(1) # half second
+      order_placed = call_secret_api(sell_limit_url)
+      puts (order_placed and !order_placed["uuid"].nil? ? "Success".green : "Failed".red)
+      cnt += 1
+    end
+    p [order_placed, "Sell #{balance_details["Available"]} of #{market_name} at #{sell_price}"]
+  else
+    puts "Insufficient Balance".red
+  end
 end
 
 # method to place BUY and SELL order immediately after purchase
@@ -223,6 +254,7 @@ def buy_sell_bot(percent_increase = 0.05, chunk = 0.004, prepump_buffer = 0.5, p
     buy_price = last_price + last_price * percent_increase
     get_balance_url = get_url({:api_type => "account", :action => "currency_balance", :currency => currency})
     balance_details = call_secret_api(get_balance_url)
+    p balance_details
     if balance_details and balance_details["Available"] and balance_details["Available"] > 0.0 # available coins present
       qty = balance_details["Available"]/splits
       splits.times do |i|
@@ -230,7 +262,18 @@ def buy_sell_bot(percent_increase = 0.05, chunk = 0.004, prepump_buffer = 0.5, p
         sell_price = buy_price + buy_price * (profit * (i+1))
         sell_price = "%.8f" % sell_price
         sell_limit_url = get_url({:api_type => "market", :action => "sell", :market => market_name, :quantity => qty, :rate => sell_price})
+        puts "Selling coin...".yellow
+        p [{:api_type => "market", :action => "sell", :market => market_name, :quantity => qty, :rate => sell_price}]
         order_placed = call_secret_api(sell_limit_url)
+        puts (order_placed and !order_placed["uuid"].nil? ? "Success".green : "Failed".red)
+        cnt = 1
+        while cnt <= 3 and order_placed and order_placed["uuid"].nil? #retry
+          puts "Retry #{cnt} : Selling coin...".yellow
+          sleep(1) # half second
+          order_placed = call_secret_api(sell_limit_url)
+          puts (order_placed and !order_placed["uuid"].nil? ? "Success".green : "Failed".red)
+          cnt += 1
+        end
         p [order_placed, "Sell #{qty} of #{market_name} at #{sell_price}"]
       end
     end

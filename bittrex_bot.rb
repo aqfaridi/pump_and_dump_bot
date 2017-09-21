@@ -243,7 +243,7 @@ end
 # prepump_buffer(float) -  Allowed buffer for prepump
 # profit(float) -> SELL_PRICE = (1.0 + profit) * BUY_PRICE
 # splits(int) -> How many splits of available quantity you want to make [profit] increment each time in next sell order
-def buy_sell_bot(percent_increase = 0.05, chunk = 0.004, prepump_buffer = 0.5, profit = 0.2, splits = 2)
+def buy_sell_bot(percent_increase = 0.05, chunk = 0.004, prepump_buffer = 0.5, profit = 0.2, splits = 2, no_of_retries = 10)
   market_name = @market_name
   currency = @currency
   low_24_hr, last_price, ask_price = get_market_summary(market_name)
@@ -252,30 +252,36 @@ def buy_sell_bot(percent_increase = 0.05, chunk = 0.004, prepump_buffer = 0.5, p
   if last_price < (1.0 + prepump_buffer)*low_24_hr #last_price is smaller than 50% increase since yerterday
     order = buy_chunk(last_price, market_name, percent_increase, chunk)
     buy_price = last_price + last_price * percent_increase
-    get_balance_url = get_url({:api_type => "account", :action => "currency_balance", :currency => currency})
-    balance_details = call_secret_api(get_balance_url)
-    p balance_details
-    if balance_details and balance_details["Available"] and balance_details["Available"] > 0.0 # available coins present
-      qty = balance_details["Available"]/splits
-      splits.times do |i|
-        qty += (balance_details["Available"].to_i % splits) if (i-1 == splits)
-        sell_price = buy_price + buy_price * (profit * (i+1))
-        sell_price = "%.8f" % sell_price
-        sell_limit_url = get_url({:api_type => "market", :action => "sell", :market => market_name, :quantity => qty, :rate => sell_price})
-        puts "Selling coin...".yellow
-        p [{:api_type => "market", :action => "sell", :market => market_name, :quantity => qty, :rate => sell_price}]
-        order_placed = call_secret_api(sell_limit_url)
-        puts (order_placed and !order_placed["uuid"].nil? ? "Success".green : "Failed".red)
-        cnt = 1
-        while cnt <= 3 and order_placed and order_placed["uuid"].nil? #retry
-          puts "Retry #{cnt} : Selling coin...".yellow
-          sleep(1) # half second
+    counter = 0
+    while counter < no_of_retries
+      get_balance_url = get_url({:api_type => "account", :action => "currency_balance", :currency => currency})
+      balance_details = call_secret_api(get_balance_url)
+      p balance_details
+      if balance_details and balance_details["Available"] and balance_details["Available"] > 0.0 # available coins present
+        qty = balance_details["Available"]/splits
+        splits.times do |i|
+          qty += (balance_details["Available"].to_i % splits) if (i-1 == splits)
+          sell_price = buy_price + buy_price * (profit * (i+1))
+          sell_price = "%.8f" % sell_price
+          sell_limit_url = get_url({:api_type => "market", :action => "sell", :market => market_name, :quantity => qty, :rate => sell_price})
+          puts "Selling coin...".yellow
+          p [{:api_type => "market", :action => "sell", :market => market_name, :quantity => qty, :rate => sell_price}]
           order_placed = call_secret_api(sell_limit_url)
           puts (order_placed and !order_placed["uuid"].nil? ? "Success".green : "Failed".red)
-          cnt += 1
+          cnt = 1
+          while cnt <= 3 and order_placed and order_placed["uuid"].nil? #retry
+            puts "Retry #{cnt} : Selling coin...".yellow
+            sleep(1) # half second
+            order_placed = call_secret_api(sell_limit_url)
+            puts (order_placed and !order_placed["uuid"].nil? ? "Success".green : "Failed".red)
+            cnt += 1
+          end
+          p [order_placed, "Sell #{qty} of #{market_name} at #{sell_price}"]
         end
-        p [order_placed, "Sell #{qty} of #{market_name} at #{sell_price}"]
+        break
       end
+      counter += 1
+      sleep(0.5)
     end
   end
 end
